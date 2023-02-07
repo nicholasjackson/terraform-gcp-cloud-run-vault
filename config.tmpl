@@ -1,0 +1,23 @@
+default_max_request_duration = "90s"
+disable_clustering           = true
+disable_mlock                = true
+ui                           = true
+
+api_addr = "http://127.0.0.1:8200"
+
+listener "tcp" {
+  address     = "0.0.0.0:8200"
+  tls_disable = "true"
+}
+
+seal "gcpckms" {
+  key_ring   = "${gcp_key_ring}"
+  crypto_key = "${gcp_key_name}"
+  region     = "${gcp_key_region}"
+  project    = "${gcp_project}"
+}
+
+storage "gcs" {
+  bucket = "${gcp_storage_bucket}"
+  ha_enabled = "false"
+}
