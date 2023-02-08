@@ -1,9 +1,3 @@
-//# Add the permissions to lookup tokens for the vault servers service account, this is needed for vault login with GCP
-resource "google_project_iam_member" "vault_auth_role" {
-  project = data.google_project.project.project_id
-  role    = "roles/iam.serviceAccountTokenCreator"
-  member  = "serviceAccount:${google_service_account.vault_service_account.email}"
-}
 
 # Generate a Vault Admin policy
 resource "terracurl_request" "vault_policy" {
@@ -34,6 +28,43 @@ EOF
   }
 
   destroy_url            = "${google_cloud_run_service.vault.status.0.url}/v1/sys/policies/acl/admin"
+  destroy_method         = "DELETE"
+  destroy_response_codes = [200, 204, 404]
+  destroy_headers = {
+    "X-Vault-Token" = local.root_token
+  }
+}
+
+resource "terracurl_request" "additional_admin_policy" {
+  count = length(var.additional_admin_policy) > 0 ? 1 : 0
+
+  depends_on = [
+    resource.google_cloud_run_service_iam_policy.noauth
+  ]
+
+  lifecycle {
+    ignore_changes = [
+      headers,
+      destroy_headers
+    ]
+  }
+
+  name = "vault additional admin policy"
+
+  method         = "POST"
+  url            = "${google_cloud_run_service.vault.status.0.url}/v1/sys/policies/acl/admin_additional"
+  request_body   = <<EOF
+{
+  "name": "admin_additonal",
+  "policy": "${replace(replace(var.additional_admin_policy, "\"", "\\\""), "\n", "\\n")}"
+}
+EOF 
+  response_codes = [200, 204]
+  headers = {
+    "X-Vault-Token" = local.root_token
+  }
+
+  destroy_url            = "${google_cloud_run_service.vault.status.0.url}/v1/sys/policies/acl/admin_additonal"
   destroy_method         = "DELETE"
   destroy_response_codes = [200, 204, 404]
   destroy_headers = {
@@ -81,6 +112,10 @@ EOF
   }
 }
 
+locals {
+  admin_policies = length(var.additional_admin_policy) > 0 ? ["admin", "additional_admin_policy"] : ["admin"]
+}
+
 # Create a role that allows the specified service account ability to authenticate with vault and get admin rights
 resource "terracurl_request" "vault_auth_role" {
   depends_on = [
@@ -105,9 +140,8 @@ resource "terracurl_request" "vault_auth_role" {
   request_body   = <<EOF
 {
   "type": "iam",
-  "project_id": "${var.project_id}",
-  "policies": ["admin"],
-  "bound_service_accounts": ["${var.service_account_email}"]
+  "policies": ${jsonencode(local.admin_policies)},
+  "bound_service_accounts": ${jsonencode(var.admin_service_accounts)}
 }
 EOF 
   response_codes = [200, 204]

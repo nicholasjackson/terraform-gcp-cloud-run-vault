@@ -58,14 +58,3 @@ path "sys/mounts"
   capabilities = ["read"]
 }
 
-# Manage database mounts
-path "database/*"
-{
-  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
-}
-
-# Enable permission to manage secrets
-path "secret/*"
-{
-  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
-}

@@ -13,11 +13,9 @@ terraform {
 }
 
 provider "google" {
-  project = var.project_id
+  project = var.project
   region  = var.region
 }
-
-data "google_project" "project" {}
 
 # Create a service account for the Vault server
 resource "google_service_account" "vault_service_account" {
@@ -25,6 +23,21 @@ resource "google_service_account" "vault_service_account" {
   display_name = "Vault Service Account"
 }
 
+# Add the permissions to lookup tokens for the vault servers service account, this is needed for vault login with GCP
+resource "google_project_iam_member" "vault_auth_role" {
+  project = google_service_account.vault_service_account.project
+
+  role   = "roles/iam.serviceAccountTokenCreator"
+  member = "serviceAccount:${google_service_account.vault_service_account.email}"
+}
+
+# Add permission for the vault serviced account to call the authenticated Vault URL before Vault is unsealed
+resource "google_project_iam_member" "vault_invoker_role" {
+  project = google_service_account.vault_service_account.project
+
+  role   = "roles/run.admin"
+  member = "serviceAccount:${google_service_account.vault_service_account.email}"
+}
 
 # Generate a random id so that the bucket name is unique
 resource "random_id" "bucket_id" {
@@ -34,7 +47,7 @@ resource "random_id" "bucket_id" {
 # Create a storage bucket for the Vault data
 resource "google_storage_bucket" "vault_data" {
   name          = "vault-data-${random_id.bucket_id.hex}"
-  location      = "EU"
+  location      = var.region
   force_destroy = true
 
   public_access_prevention = "enforced"
@@ -50,14 +63,14 @@ resource "google_storage_bucket_iam_binding" "vault_data_binding" {
 
 # Create a keymanager for the unseal keys, keys can not be deleted once created, they are only removed from the state
 resource "google_kms_key_ring" "vault_unseal" {
-  count    = 0
+  count    = var.create_kms_keyring_and_key ? 1 : 0
   name     = "vault-unseal-key"
   location = "global"
 }
 
 # Create an unseal key for Vault, keys can not be deleted once created
 resource "google_kms_crypto_key" "vault_unseal" {
-  count    = 0
+  count    = var.create_kms_keyring_and_key ? 1 : 0
   name     = "unseal"
   key_ring = google_kms_key_ring.vault_unseal.0.id
   purpose  = "ENCRYPT_DECRYPT"
@@ -108,7 +121,7 @@ resource "google_secret_manager_secret_version" "vault_server_config_version" {
     gcp_key_name       = "unseal"
     gcp_key_region     = "global"
     gcp_storage_bucket = google_storage_bucket.vault_data.name
-    gcp_project        = var.project_id
+    gcp_project        = var.project
   })
 }
 
@@ -123,7 +136,7 @@ resource "google_secret_manager_secret_iam_binding" "vault_server_binding" {
 
 # Run Vault in CloudRun
 resource "google_cloud_run_service" "vault" {
-  name     = "vault"
+  name     = "vault-server"
   location = var.region
 
   template {
@@ -154,13 +167,13 @@ resource "google_cloud_run_service" "vault" {
 
         resources {
           limits = {
-            cpu    = "2.0"
-            memory = "2048Mi"
+            cpu    = var.cpu
+            memory = var.memory
           }
 
           requests = {
-            cpu    = "2.0"
-            memory = "2048Mi"
+            cpu    = var.cpu
+            memory = var.memory
           }
         }
 
@@ -200,7 +213,7 @@ resource "google_cloud_run_service" "vault" {
 # Initialize vault and get the root token sinced vault is currently not initialized
 # it is not open to public requests, we need to use an oidc token
 data "google_service_account_id_token" "oidc" {
-  target_service_account = var.service_account_email
+  target_service_account = google_service_account.vault_service_account.email
   delegates              = []
   include_email          = true
   target_audience        = google_cloud_run_service.vault.status.0.url
@@ -222,6 +235,10 @@ resource "terracurl_request" "vault_init" {
   headers = {
     "Authorization" = "Bearer ${data.google_service_account_id_token.oidc.id_token}"
   }
+}
+
+locals {
+  root_token = terracurl_request.vault_init.response == null ? null : jsondecode(terracurl_request.vault_init.response).root_token
 }
 
 # Disable authentication for the Vault server now that it is initialized
