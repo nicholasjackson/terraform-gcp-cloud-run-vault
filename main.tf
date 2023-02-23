@@ -7,7 +7,7 @@ terraform {
 
     terracurl = {
       source  = "devops-rob/terracurl"
-      version = "0.1.1"
+      version = "1.0.1"
     }
   }
 }
@@ -63,21 +63,36 @@ resource "google_storage_bucket_iam_binding" "vault_data_binding" {
 
 # Create a keymanager for the unseal keys, keys can not be deleted once created, they are only removed from the state
 resource "google_kms_key_ring" "vault_unseal" {
-  count    = var.create_kms_keyring_and_key ? 1 : 0
-  name     = "vault-unseal-key"
+  count = var.create_kms_keyring ? 1 : 0
+
+  name     = var.kms_keyring_name
   location = "global"
+}
+
+data "google_kms_key_ring" "vault_unseal" {
+  name     = var.kms_keyring_name
+  location = "global"
+}
+
+locals {
+  kms_key_ring = var.create_kms_keyring ? google_kms_key_ring.vault_unseal.0.id : data.google_kms_key_ring.vault_unseal.id
+  kms_key_name = "${var.kms_crypto_key_prefix}-${random_id.kms_key_id.hex}"
+}
+
+resource "random_id" "kms_key_id" {
+  byte_length = 8
 }
 
 # Create an unseal key for Vault, keys can not be deleted once created
 resource "google_kms_crypto_key" "vault_unseal" {
-  count    = var.create_kms_keyring_and_key ? 1 : 0
-  name     = "unseal"
-  key_ring = google_kms_key_ring.vault_unseal.0.id
+  name     = local.kms_key_name
+  key_ring = local.kms_key_ring
   purpose  = "ENCRYPT_DECRYPT"
 }
 
+
 resource "google_kms_crypto_key_iam_binding" "crypto_key_encrypt" {
-  crypto_key_id = data.google_kms_crypto_key.vault_unseal.id
+  crypto_key_id = google_kms_crypto_key.vault_unseal.id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
 
   members = [
@@ -86,22 +101,12 @@ resource "google_kms_crypto_key_iam_binding" "crypto_key_encrypt" {
 }
 
 resource "google_kms_crypto_key_iam_binding" "crypto_key_get" {
-  crypto_key_id = data.google_kms_crypto_key.vault_unseal.id
+  crypto_key_id = google_kms_crypto_key.vault_unseal.id
   role          = "roles/cloudkms.viewer"
 
   members = [
     "serviceAccount:${google_service_account.vault_service_account.email}",
   ]
-}
-
-data "google_kms_crypto_key" "vault_unseal" {
-  name     = "unseal"
-  key_ring = data.google_kms_key_ring.vault_unseal.id
-}
-
-data "google_kms_key_ring" "vault_unseal" {
-  name     = "vault-unseal-key"
-  location = "global"
 }
 
 # Add the Vault config to the secrets manager
@@ -117,8 +122,8 @@ resource "google_secret_manager_secret_version" "vault_server_config_version" {
   secret = google_secret_manager_secret.vault_server_config.id
 
   secret_data = templatefile("${path.module}/config.tmpl", {
-    gcp_key_ring       = "vault-unseal-key"
-    gcp_key_name       = "unseal"
+    gcp_key_ring       = var.kms_keyring_name
+    gcp_key_name       = local.kms_key_name
     gcp_key_region     = "global"
     gcp_storage_bucket = google_storage_bucket.vault_data.name
     gcp_project        = var.project
@@ -145,10 +150,9 @@ resource "google_cloud_run_service" "vault" {
         image = "docker.io/library/vault:1.12.2"
 
         startup_probe {
-          initial_delay_seconds = 180
-          timeout_seconds       = 3
-          period_seconds        = 10
-          failure_threshold     = 5
+          timeout_seconds   = 3
+          period_seconds    = 10
+          failure_threshold = 5
 
           http_get {
             path = "/v1/sys/seal-status"
@@ -204,7 +208,7 @@ resource "google_cloud_run_service" "vault" {
     metadata {
       annotations = {
         "autoscaling.knative.dev/maxScale" = "1"
-        "autoscaling.knative.dev/minScale" = "1"
+        "autoscaling.knative.dev/minScale" = "0"
       }
     }
   }
@@ -219,6 +223,15 @@ data "google_service_account_id_token" "oidc" {
   target_audience        = google_cloud_run_service.vault.status.0.url
 }
 
+locals {
+  init_config = {
+    recovery_shares    = length(var.recovery_pgp_keys) == 0 ? 1 : length(var.recovery_pgp_keys)
+    recovery_threshold = var.recovery_threshold
+    stored_share       = 1
+    recovery_pgp_keys  = var.recovery_pgp_keys
+  }
+}
+
 resource "terracurl_request" "vault_init" {
   name = "vault init"
 
@@ -230,8 +243,13 @@ resource "terracurl_request" "vault_init" {
 
   method         = "POST"
   url            = "${google_cloud_run_service.vault.status.0.url}/v1/sys/init"
-  request_body   = file("${path.module}/init.json")
+  request_body   = jsonencode(local.init_config)
   response_codes = [200]
+
+  # Vault might no be immediately able to serve the api request, retry this 
+  max_retry      = 5
+  retry_interval = 30
+
   headers = {
     "Authorization" = "Bearer ${data.google_service_account_id_token.oidc.id_token}"
   }
