@@ -139,6 +139,10 @@ resource "google_secret_manager_secret_iam_binding" "vault_server_binding" {
   ]
 }
 
+locals {
+  minScale = var.enable_scale_to_0 ? "0" : "1"
+}
+
 # Run Vault in CloudRun
 resource "google_cloud_run_service" "vault" {
   name     = "vault-server"
@@ -208,7 +212,7 @@ resource "google_cloud_run_service" "vault" {
     metadata {
       annotations = {
         "autoscaling.knative.dev/maxScale" = "1"
-        "autoscaling.knative.dev/minScale" = "0"
+        "autoscaling.knative.dev/minScale" = "${local.minScale}"
       }
     }
   }

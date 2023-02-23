@@ -47,6 +47,16 @@ variable "memory" {
   default     = "2048Mi"
 }
 
+variable "enable_scale_to_0" {
+  description = <<-EOF
+    After approximately 15 minutes of no requests to the sever CloudRun will remove the Vault server saving costs.
+    After scaling to 0 a new Vault server will automatically be started when a request is received, the cold start time 
+    for the server is approximately 10s.
+  EOF
+  type        = bool
+  default     = false
+}
+
 variable "recovery_pgp_keys" {
   description = <<-EOF
     PGP keys used to encrypt the Vault recovery keys. The number of keys specified
