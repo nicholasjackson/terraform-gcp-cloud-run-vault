@@ -23,20 +23,6 @@ module "vault" {
 
   admin_service_accounts  = ["1060272596826-compute@developer.gserviceaccount.com"]
 
-  additional_admin_policy = <<-EOF
-    # Manage database mounts
-    path "database/*"
-    {
-      capabilities = ["create", "read", "update", "delete", "list", "sudo"]
-    }
-    
-    # Enable permission to manage secrets
-    path "secret/*"
-    {
-      capabilities = ["create", "read", "update", "delete", "list", "sudo"]
-    }
-  EOF
-
   cpu = "2.0"
   memory = "2048Mi"
 }
